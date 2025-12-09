@@ -1,0 +1,156 @@
+using UnityEngine;
+
+/// <summary>
+/// Waypoint for AI cars to follow. Link waypoints in sequence to create a racing line.
+/// Can auto-link based on hierarchy order for easy setup.
+/// </summary>
+public class F1Waypoint : MonoBehaviour
+{
+    [Header("Auto-Linking")]
+    [Tooltip("Automatically link waypoints based on hierarchy order (sibling index)")]
+    public bool autoLinkOnStart = true;
+    
+    [Header("Waypoint Settings")]
+    [Tooltip("The next waypoint in the sequence (auto-set if Auto Link is enabled)")]
+    public F1Waypoint nextWaypoint;
+    
+    [Tooltip("Recommended speed for this waypoint (km/h). AI will try to match this speed.")]
+    [Range(50, 320)]
+    public float recommendedSpeed = 200f;
+    
+    [Header("Debug")]
+    public bool showGizmo = true;
+    public Color gizmoColor = Color.cyan;
+    public float gizmoRadius = 2f;
+
+    void Start()
+    {
+        if (autoLinkOnStart)
+        {
+            AutoLinkWaypoints();
+        }
+    }
+
+    /// <summary>
+    /// Automatically link this waypoint to the next one based on hierarchy order
+    /// </summary>
+    void AutoLinkWaypoints()
+    {
+        // Only auto-link if we have a parent
+        if (transform.parent == null)
+        {
+            Debug.LogWarning($"Waypoint {gameObject.name} has no parent. Auto-linking requires waypoints to be children of a parent GameObject.");
+            return;
+        }
+
+        // Get all waypoint siblings
+        F1Waypoint[] siblings = transform.parent.GetComponentsInChildren<F1Waypoint>();
+        
+        if (siblings.Length <= 1)
+        {
+            Debug.LogWarning($"Only one waypoint found under parent {transform.parent.name}. Need at least 2 waypoints.");
+            return;
+        }
+
+        // Find our index among siblings
+        int myIndex = transform.GetSiblingIndex();
+        
+        // Find the next sibling waypoint
+        // We search through all siblings to find the one with the next highest sibling index
+        F1Waypoint nextSibling = null;
+        int nextIndex = -1;
+        
+        foreach (F1Waypoint wp in siblings)
+        {
+            int wpIndex = wp.transform.GetSiblingIndex();
+            
+            // Find the waypoint with sibling index immediately after ours
+            if (wpIndex > myIndex && (nextIndex == -1 || wpIndex < nextIndex))
+            {
+                nextSibling = wp;
+                nextIndex = wpIndex;
+            }
+        }
+
+        // If no next waypoint found, we're the last one - loop back to first
+        if (nextSibling == null)
+        {
+            // Find waypoint with lowest sibling index (first one)
+            int minIndex = int.MaxValue;
+            foreach (F1Waypoint wp in siblings)
+            {
+                int wpIndex = wp.transform.GetSiblingIndex();
+                if (wpIndex < minIndex)
+                {
+                    nextSibling = wp;
+                    minIndex = wpIndex;
+                }
+            }
+        }
+
+        // Set the next waypoint
+        if (nextSibling != null && nextSibling != this)
+        {
+            nextWaypoint = nextSibling;
+            Debug.Log($"Auto-linked {gameObject.name} → {nextWaypoint.gameObject.name}");
+        }
+    }
+
+    /// <summary>
+    /// Find the closest waypoint to a given position from an array of waypoints
+    /// </summary>
+    public static F1Waypoint FindClosestWaypoint(Vector3 position, F1Waypoint[] waypoints)
+    {
+        F1Waypoint closest = null;
+        float minDistance = float.MaxValue;
+
+        foreach (F1Waypoint waypoint in waypoints)
+        {
+            if (waypoint == null) continue;
+            
+            float distance = Vector3.Distance(position, waypoint.transform.position);
+            if (distance < minDistance)
+            {
+                minDistance = distance;
+                closest = waypoint;
+            }
+        }
+
+        return closest;
+    }
+
+    void OnDrawGizmos()
+    {
+        if (!showGizmo) return;
+
+        // Draw sphere at waypoint position
+        Gizmos.color = gizmoColor;
+        Gizmos.DrawWireSphere(transform.position, gizmoRadius);
+
+        // Draw line to next waypoint
+        if (nextWaypoint != null)
+        {
+            Gizmos.color = Color.green;
+            Gizmos.DrawLine(transform.position, nextWaypoint.transform.position);
+            
+            // Draw arrow head
+            Vector3 direction = (nextWaypoint.transform.position - transform.position).normalized;
+            Vector3 arrowPos = transform.position + direction * Vector3.Distance(transform.position, nextWaypoint.transform.position) * 0.5f;
+            DrawArrow(arrowPos, direction, 1f);
+        }
+
+        #if UNITY_EDITOR
+        // Draw waypoint name and recommended speed
+        UnityEditor.Handles.Label(transform.position + Vector3.up * 3, 
+            $"{gameObject.name}\n{recommendedSpeed} km/h");
+        #endif
+    }
+
+    void DrawArrow(Vector3 position, Vector3 direction, float size)
+    {
+        Vector3 right = Quaternion.LookRotation(direction) * Quaternion.Euler(0, 180 + 20, 0) * new Vector3(0, 0, 1);
+        Vector3 left = Quaternion.LookRotation(direction) * Quaternion.Euler(0, 180 - 20, 0) * new Vector3(0, 0, 1);
+        Gizmos.DrawRay(position, right * size);
+        Gizmos.DrawRay(position, left * size);
+    }
+}

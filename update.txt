@@ -1,0 +1,27 @@
+Instability in high-speed turns (tipping/spinning): Caused by 4WD (unrealistic for F1; overloads front grip/TC ineffective on forward accel) + TC only activates on reverse (throttleAxis sign bug). RWD realistic (F1 rears only), TC fix enables spin control. Feasible, instantly stable in Unity WC sims.
+
+Code changes in SetInputs():
+
+After currentMotorTorque calc (in both forward/reverse blocks):C#// RWD for F1 realism/stability
+frontLeftCollider.motorTorque = 0f;
+frontRightCollider.motorTorque = 0f;
+rearLeftCollider.motorTorque = currentMotorTorque;
+rearRightCollider.motorTorque = currentMotorTorque;
+Change throttleAxis = throttle; to throttleAxis = Mathf.Abs(throttle); (both accel blocks).
+In forward block (if (throttle < 0)), replace torqueBoost:C#float speedRatio = carSpeed / currentMaxForwardSpeed;
+float torqueMultiplier = Mathf.Lerp(1.5f, 0.3f, speedRatio);  // Max low-speed torque, taper high-speed (realistic)
+currentMotorTorque = throttle * currentAccelerationMultiplier * 100f * torqueMultiplier;
+
+
+Immediate coast stop: Artificial DecelerateCar() vel damping overrides physics (ignores brakeForce). Replace with engine braking (F1 reality: strong rear decel ~1-1.5g, tunable/natural).
+
+Code changes:
+
+Add: [Range(200, 1500)] public int engineBrakeForce = 500;
+Replace entire else // No throttle... block with:C#else
+{
+  currentBrakeTorque = engineBrakeForce;
+}
+Delete: bool deceleratingCar;, entire DecelerateCar() method, all its calls/invokes.
+
+Test: Tune engineBrakeForce (500~0.8g decel, realistic F1 coast). Still tips? Share WheelCollider friction/suspension values, bodyMassCenter (set y=-0.7~-1.0), rb.mass (~795kg).

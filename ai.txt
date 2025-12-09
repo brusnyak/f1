@@ -1,0 +1,261 @@
+using UnityEngine;
+using System.Collections.Generic;
+
+public class F1AIController : MonoBehaviour
+{
+    public PrometeoCarController carController;
+    public CarPowerUpManager powerUpManager;
+    public GameObject waypointParent;
+    [SerializeField] public LayerMask trackLayer; // Layer for tarmac and white lines
+    [SerializeField] public LayerMask obstacleLayer; // Layer for obstacles and other cars
+
+    private List<F1Waypoint> waypoints;
+    private int currentWaypointIndex = 0;
+    private float currentTargetSpeed = 60f; // Base target speed for AI
+    private float waypointDetectionRadius = 10f;
+    private float collisionAvoidanceDistance = 20f;
+    private float reverseTime = 2f;
+    private float reconfigureTime = 3f;
+    private float stuckTimer = 0f;
+    private Vector3 lastPosition;
+    private float stuckThreshold = 0.5f; // How much movement is considered "stuck"
+    private float stuckCheckInterval = 1f;
+    private float lastStuckCheckTime;
+
+    // AI States for behavior management
+    private enum AIState { Driving, Reversing, Reconfiguring }
+    private AIState currentState = AIState.Driving;
+    private float stateTimer = 0f;
+
+    void Start()
+    {
+        if (carController == null)
+        {
+            carController = GetComponent<PrometeoCarController>();
+        }
+        if (powerUpManager == null)
+        {
+            powerUpManager = GetComponent<CarPowerUpManager>();
+        }
+
+        if (waypointParent != null)
+        {
+            waypoints = new List<F1Waypoint>();
+            foreach (Transform child in waypointParent.transform)
+            {
+                F1Waypoint waypoint = child.GetComponent<F1Waypoint>();
+                if (waypoint != null)
+                {
+                    waypoints.Add(waypoint);
+                }
+            }
+            // Sort waypoints by their sibling index in the hierarchy
+            waypoints.Sort((a, b) => a.transform.GetSiblingIndex().CompareTo(b.transform.GetSiblingIndex()));
+        }
+        else
+        {
+            Debug.LogError("Waypoint Parent not assigned to F1AIController on " + gameObject.name);
+            enabled = false;
+            return;
+        }
+
+        lastPosition = transform.position;
+        lastStuckCheckTime = Time.time;
+
+        // Disable AI controller at start, F1RaceManager will enable it when race begins
+        this.enabled = false;
+    }
+
+    void FixedUpdate()
+    {
+        HandleStuckDetection();
+
+        switch (currentState)
+        {
+            case AIState.Driving:
+                Drive();
+                break;
+            case AIState.Reversing:
+                Reverse();
+                break;
+            case AIState.Reconfiguring:
+                Reconfigure();
+                break;
+        }
+    }
+
+    void Drive()
+    {
+        if (waypoints == null || waypoints.Count == 0) return;
+
+        // Find the next waypoint
+        F1Waypoint targetWaypoint = waypoints[currentWaypointIndex];
+        Vector3 targetWaypointPosition = targetWaypoint.transform.position;
+        Vector3 directionToWaypoint = (targetWaypointPosition - transform.position).normalized;
+
+        // Declare inputs once at the beginning of the method
+        float throttleInput = 0f;
+        float brakeInput = 0f;
+        float steerInput = 0f;
+
+        // Calculate initial steering based on current waypoint
+        float angleToWaypoint = Vector3.SignedAngle(transform.forward, directionToWaypoint, Vector3.up);
+        steerInput = Mathf.Clamp(angleToWaypoint / 45f, -1f, 1f); // Adjust sensitivity
+
+        // Always try to drive forward towards the waypoint
+        // If the car is facing significantly away from the waypoint, prioritize turning
+        if (Mathf.Abs(angleToWaypoint) > 90f) // If facing more than 90 degrees away
+        {
+            throttleInput = 0f; // No forward throttle
+            brakeInput = 0.8f; // Apply strong brake to stop and turn
+            steerInput = Mathf.Sign(angleToWaypoint); // Steer aggressively towards the waypoint
+        }
+        else
+        {
+            // If facing generally towards the waypoint, apply throttle and adjust speed
+            throttleInput = 1f; // Default to full throttle
+            brakeInput = 0f;
+
+            // Speed control based on distance to next waypoint and current speed
+            if (carController.carSpeed < currentTargetSpeed)
+            {
+                throttleInput = 1f;
+            }
+            else if (carController.carSpeed > currentTargetSpeed)
+            {
+                brakeInput = 0.5f; // Apply some brake to reduce speed
+            }
+
+            // Adjust for turns (existing logic)
+            Vector3 nextWaypointPosition = waypoints[(currentWaypointIndex + 1) % waypoints.Count].transform.position;
+            Vector3 directionToNextWaypoint = (nextWaypointPosition - targetWaypointPosition).normalized;
+            float angleToNextWaypointForTurn = Vector3.Angle(directionToWaypoint, directionToNextWaypoint); // Renamed to avoid scope conflict
+
+            if (angleToNextWaypointForTurn > 45f) // Sharp turn ahead
+            {
+                throttleInput = Mathf.Min(throttleInput, 0.2f); // Reduce throttle for turns
+                brakeInput = Mathf.Max(brakeInput, 0.8f); // Apply more brake for turns
+            }
+        }
+
+        // Collision Avoidance
+        RaycastHit hit;
+        if (Physics.Raycast(transform.position, transform.forward, out hit, collisionAvoidanceDistance, obstacleLayer))
+        {
+            // Obstacle detected, try to steer away
+            steerInput += (hit.normal.x > 0 ? -1f : 1f) * 0.5f; // Simple avoidance
+            currentTargetSpeed = 20f; // Slow down
+        }
+        else
+        {
+            currentTargetSpeed = 60f; // Resume normal speed
+        }
+
+        // Track Adherence (more sophisticated check with multiple raycasts)
+        float trackCheckDistance = 10f; // How far ahead to check for track boundaries
+        float trackRayOffset = 2f; // How far left/right to cast rays
+
+        RaycastHit leftTrackHit;
+        bool leftTrackDetected = Physics.Raycast(transform.position + transform.up * 0.5f + transform.right * trackRayOffset, transform.forward, out leftTrackHit, trackCheckDistance, trackLayer);
+        RaycastHit rightTrackHit;
+        bool rightTrackDetected = Physics.Raycast(transform.position + transform.up * 0.5f - transform.right * trackRayOffset, transform.forward, out rightTrackHit, trackCheckDistance, trackLayer);
+
+        if (!leftTrackDetected)
+        {
+            // Left side is off track or approaching edge, steer right
+            steerInput += 0.5f; // Stronger correction
+            currentTargetSpeed = 30f; // Slow down
+        }
+        else if (!rightTrackDetected)
+        {
+            // Right side is off track or approaching edge, steer left
+            steerInput -= 0.5f; // Stronger correction
+            currentTargetSpeed = 30f; // Slow down
+        }
+        else if (!Physics.Raycast(transform.position + Vector3.up * 0.5f, -transform.up, 1f, trackLayer))
+        {
+            // Still off track (e.g., completely left/right), try to steer back
+            steerInput += (transform.right.x > 0 ? -1f : 1f) * 0.3f; // Adjust based on current orientation
+            currentTargetSpeed = 20f; // Slow down more
+        }
+
+        float distanceToWaypoint = Vector3.Distance(transform.position, targetWaypointPosition);
+
+        if (distanceToWaypoint < waypointDetectionRadius)
+        {
+            currentWaypointIndex = (currentWaypointIndex + 1) % waypoints.Count;
+        }
+
+        // Apply inputs to car controller
+        carController.SetInputs(throttleInput, steerInput, brakeInput);
+    }
+
+    void HandleStuckDetection()
+    {
+        if (Time.time - lastStuckCheckTime > stuckCheckInterval)
+        {
+            float distanceMoved = Vector3.Distance(transform.position, lastPosition);
+            if (distanceMoved < stuckThreshold && currentState == AIState.Driving)
+            {
+                stuckTimer += stuckCheckInterval;
+                if (stuckTimer >= 2f) // If stuck for 2 seconds
+                {
+                    currentState = AIState.Reversing;
+                    stateTimer = reverseTime;
+                    stuckTimer = 0f;
+                    Debug.Log(gameObject.name + " is stuck, initiating reverse.");
+                }
+            }
+            else
+            {
+                stuckTimer = 0f;
+            }
+            lastPosition = transform.position;
+            lastStuckCheckTime = Time.time;
+        }
+    }
+
+    void Reverse()
+    {
+        stateTimer -= Time.fixedDeltaTime;
+        carController.SetInputs(-1f, 0f, 0f); // Reverse at full throttle, no steering
+        if (stateTimer <= 0)
+        {
+            // After reversing, transition to reconfiguring, but also add a small forward nudge
+            currentState = AIState.Reconfiguring;
+            stateTimer = reconfigureTime; // Use reconfigureTime for this phase
+            Debug.Log(gameObject.name + " finished reversing, initiating reconfigure.");
+        }
+    }
+
+    void Reconfigure()
+    {
+        stateTimer -= Time.fixedDeltaTime;
+        // Attempt to turn the car to face the next waypoint
+        Vector3 targetWaypointPosition = waypoints[currentWaypointIndex].transform.position;
+        Vector3 directionToWaypoint = (targetWaypointPosition - transform.position).normalized;
+        float angleToWaypoint = Vector3.SignedAngle(transform.forward, directionToWaypoint, Vector3.up);
+        float steerInput = Mathf.Clamp(angleToWaypoint / 45f, -1f, 1f);
+
+        // Apply a small forward throttle while reorienting to help get unstuck
+        carController.SetInputs(0.2f, steerInput, 0f); // Small throttle, steer to reorient
+
+        if (stateTimer <= 0)
+        {
+            currentState = AIState.Driving;
+            Debug.Log(gameObject.name + " finished reconfiguring, resuming driving.");
+        }
+    }
+
+    // Optional: AI Power-up usage logic (to be implemented later)
+    void UsePowerUp()
+    {
+        // Example: Use DRS boost if available and on a straight
+        if (powerUpManager != null && !powerUpManager.IsDRSActive()) // Check if DRS is NOT already active
+        {
+            // Add logic to determine if it's a good time to use DRS (e.g., on a straight section)
+            // For now, just activate it with a default duration if not active
+            powerUpManager.ActivatePowerUp(PowerUpType.DRS_Boost, 5f); // Assuming 5 seconds duration
+        }
+    }
+}
